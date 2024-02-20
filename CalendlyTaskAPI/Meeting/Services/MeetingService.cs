@@ -1,6 +1,5 @@
 ﻿using CalendlyTaskAPI.Core.DbContext;
 using CalendlyTaskAPI.Core.DTOs.Models;
-using CalendlyTaskAPI.Core.DTOs.Requests;
 using CalendlyTaskAPI.Core.DTOs.Responses;
 using CalendlyTaskAPI.Core.Entities;
 using CalendlyTaskAPI.Meeting.Interfaces;
@@ -9,7 +8,6 @@ using CalendlyTaskAPI.Meeting.Requests;
 using CalendlyTaskAPI.Meeting.Responses;
 using CalendlyTaskAPI.Notification.Interfaces;
 using CalendlyTaskAPI.Notification.Requests;
-using CalendlyTaskAPI.Notification.Responses;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 
