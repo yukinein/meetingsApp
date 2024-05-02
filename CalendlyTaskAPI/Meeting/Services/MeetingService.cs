@@ -117,7 +117,7 @@ namespace CalendlyTaskAPI.Meeting.Services
             foreach (var relMeeting in relatedMeetings)
             {
                 ApplicationUser relatedUser = await _userManager.FindByIdAsync(relMeeting.UserId);
-                string participantMessage = $"Your meeting scheduled on {relMeeting.StartDateTime} for '{relMeeting.Reason}' has been cancelled by {cancellingUser.FullName}.";
+                string participantMessage = $"Your meeting scheduled on {relMeeting.StartDateTime} foor '{relMeeting.Reason}' has been cancelled by {cancellingUser.FullName}.";
                 string ownerMessage = $"Your meeting scheduled on {relMeeting.StartDateTime} with {initiator.FullName} for '{relMeeting.Reason}' has been cancelled.";
 
                 // Determine the correct cancellation message based on the user
