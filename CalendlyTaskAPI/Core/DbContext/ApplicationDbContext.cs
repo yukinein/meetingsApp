@@ -11,5 +11,8 @@ namespace CalendlyTaskAPI.Core.DbContext
         }
 
         public DbSet<Entities.Meeting> Meeting { get; set; }
+
+        public DbSet<Entities.UserNotification> UserNotifications { get; set; }
+
     }
 }

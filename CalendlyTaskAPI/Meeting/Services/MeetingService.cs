@@ -1,4 +1,5 @@
-﻿using CalendlyTaskAPI.Core.DbContext;
+﻿using Azure.Identity;
+using CalendlyTaskAPI.Core.DbContext;
 using CalendlyTaskAPI.Core.DTOs.Models;
 using CalendlyTaskAPI.Core.DTOs.Responses;
 using CalendlyTaskAPI.Core.Entities;
@@ -9,7 +10,10 @@ using CalendlyTaskAPI.Meeting.Responses;
 using CalendlyTaskAPI.Notification.Interfaces;
 using CalendlyTaskAPI.Notification.Requests;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.EntityFrameworkCore;
+using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace CalendlyTaskAPI.Meeting.Services
 {
@@ -35,11 +39,15 @@ namespace CalendlyTaskAPI.Meeting.Services
                 .Select(x => new MeetingModel
                 {
                     Id = x.Id,
-                    Name = x.Name,
+                    GroupId = x.GroupId,
+                    Name = x.UserName,
                     DurationInMinutes = x.DurationInMinutes,
                     StartDateTime = x.StartDateTime,
+                    EndDateTime = x.EndDateTime,
                     Reason = x.Reason,
-                    InitiatorUserId = x.InitiatorUserId
+                    InitiatorUserId = x.InitiatorUserId,
+                    InitiatorFullName = x.InitiatorFullName,
+                    UserId = x.UserId,
                 }).ToListAsync();
 
             foreach (var meeting in meetings)
@@ -53,66 +61,35 @@ namespace CalendlyTaskAPI.Meeting.Services
             return new GetMeetingsForUserResponse { List = meetings };
         }
 
-        public async Task<OperationStatusResponse> CreateMeeting(CreateMeetingRequest request)
+        public async Task<OperationStatusResponse> CreateMeeting(CreateMeetingRequest request, string initiatorUserId)
         {
-            if (string.IsNullOrWhiteSpace(request.Name))
+            var user = await _userManager.FindByIdAsync(initiatorUserId);
+            var recieverUser = await _userManager.FindByIdAsync(request.UserId);
+            string userName = user.UserName;
+            string recieverUserName = recieverUser.UserName;
+
+            if (string.IsNullOrWhiteSpace(userName))
                 return new OperationStatusResponse { IsSuccessful = false, Message = "Invalid name" };
 
             if (request.DurationInMinutes < 5)
-                return new OperationStatusResponse { IsSuccessful = false, Message = "Meeting must last atleast for 5 minutes." };
+                return new OperationStatusResponse { IsSuccessful = false, Message = "Meeting must last at least for 5 minutes." };
 
             if (request.StartDateTime < DateTimeOffset.Now)
-                return new OperationStatusResponse { IsSuccessful = false, Message = "You can schedule meeting in the past." };
+                return new OperationStatusResponse { IsSuccessful = false, Message = "You cannot schedule a meeting in the past." };
 
-            if (await HasOverlap(request.StartDateTime, request.DurationInMinutes, request.UserId))
-                return new OperationStatusResponse { IsSuccessful = false, Message = "There is overlap with other meetings" };
+            // Prepare the message to send as a notification
+            string notificationMessage = $"You are invited by '{userName}' to the meeting planned for {request.StartDateTime}, " +
+                                         $"which will last for {request.DurationInMinutes} minutes. Reason for the meeting: '{request.Reason}', " +
+                                         $"Please approve or reject this meeting.";
 
-            Core.Entities.Meeting meeting = new()
-            {
-                Name = request.Name,
-                DurationInMinutes = request.DurationInMinutes,
-                StartDateTime = request.StartDateTime,
-                EndDateTime = request.StartDateTime.AddMinutes(request.DurationInMinutes),
-                Reason = request.Reason,
-                UserId = request.UserId,
-                InitiatorUserId = request.InitiatorUserId
-            };
+            // Send a notification for meeting approval
+            await SendNotificationAsync(request.UserId, recieverUserName, initiatorUserId, userName, notificationMessage, request.StartDateTime, request.DurationInMinutes, request.Reason);
 
-            _context.Add(meeting);
-
-            int rowsChanged = await _context.SaveChangesAsync();
-
-            if(request.InitiatorUserId is not null)
-            {
-                var user = await _userManager.FindByIdAsync(request.UserId);
-                var initiator = await _userManager.FindByIdAsync(request.InitiatorUserId);
-
-                SendEmailRequest emailRequest = new SendEmailRequest
-                {
-                    EmailTo = new List<string> { user!.Email! },
-                    EmailSubject = "You have new meeting.",
-                    EmailBody = $"Hello, {initiator!.Email} scheduled a meeting with you starting at {request.StartDateTime}, with duration of {request.DurationInMinutes} minutes, reason: {request.Reason}"
-                };
-
-                await _emailService.SendEmail(emailRequest);
-            }
-
-            if (rowsChanged > 0)
-                return new OperationStatusResponse { IsSuccessful = true, Message = "Meeting has been saved." };
-            else
-                return new OperationStatusResponse { IsSuccessful = false, Message = "Something went wrong" };
+            return new OperationStatusResponse { IsSuccessful = true, Message = "Meeting creation request has been sent." };
         }
 
-        private async Task<bool> HasOverlap(DateTimeOffset startDateTime, int durationInMinutes, string userId)
-        {
-            DateTimeOffset endDateTime = startDateTime.AddMinutes(durationInMinutes);
 
-            bool hasOverlap = await _context.Meeting.AnyAsync(x => x.StartDateTime < endDateTime && x.EndDateTime > startDateTime && x.UserId == userId);
-
-            return hasOverlap;
-        }
-
-        public async Task<DeleteMeetingResponse> DeleteMeeting(DeleteMeetingRequest request)
+        public async Task<DeleteMeetingResponse> DeleteMeeting(DeleteMeetingRequest request, string userId)
         {
             var meeting = await _context.Meeting.Where(x => x.Id == request.MeetingId).FirstOrDefaultAsync();
 
@@ -120,12 +97,29 @@ namespace CalendlyTaskAPI.Meeting.Services
             {
                 return new DeleteMeetingResponse
                 {
-                    OperationStatusResponse = new OperationStatusResponse { IsSuccessful = false, Message = "Meeting does not exist" },
-                    GetMeetingsForUserResponse = await GetMeetingsForUser(request.GetMeetingsForUserRequest)
+                    OperationStatusResponse = new OperationStatusResponse { IsSuccessful = false, Message = "Meeting does not exist." },
                 };
             }
 
-            _context.Remove(meeting);
+            // Check if the current user is the owner of the meeting
+            if (meeting.UserId != userId)
+            {
+                return new DeleteMeetingResponse
+                {
+                    OperationStatusResponse = new OperationStatusResponse { IsSuccessful = false, Message = "Unauthorized: You can only delete meetings you have created." },
+                };
+            }
+
+            // Get the GroupId of the meeting being deleted
+            int groupId = meeting.GroupId;
+
+            // Find all meetings with the same GroupId
+            var meetingsToDelete = _context.Meeting.Where(x => x.GroupId == groupId && x.UserId == userId);
+
+            foreach (var meetingToDelete in meetingsToDelete)
+            {
+                _context.Remove(meetingToDelete);
+            }
 
             int rowsChanged = await _context.SaveChangesAsync();
 
@@ -133,19 +127,18 @@ namespace CalendlyTaskAPI.Meeting.Services
             {
                 return new DeleteMeetingResponse
                 {
-                    OperationStatusResponse = new OperationStatusResponse { IsSuccessful = true, Message = $"Success. Meeting with ID {meeting.Id} deleted successfully." },
-                    GetMeetingsForUserResponse = await GetMeetingsForUser(request.GetMeetingsForUserRequest)
+                    OperationStatusResponse = new OperationStatusResponse { IsSuccessful = true, Message = $"Success. Meetings with GroupId {groupId} deleted successfully." },
                 };
             }
             else
             {
                 return new DeleteMeetingResponse
                 {
-                    OperationStatusResponse = new OperationStatusResponse { IsSuccessful = false, Message = "Something went wrong" },
-                    GetMeetingsForUserResponse = await GetMeetingsForUser(request.GetMeetingsForUserRequest)
+                    OperationStatusResponse = new OperationStatusResponse { IsSuccessful = false, Message = "Something went wrong." },
                 };
             }
         }
+
 
         public async Task<DropDownResponse> GetUsers(GetUsersRequest request)
         {
@@ -176,5 +169,133 @@ namespace CalendlyTaskAPI.Meeting.Services
 
             return response;
         }
+        public async Task SendNotificationAsync(string userId, string userName, string initiatorUserId, string name, string message, DateTimeOffset startDateTime, int durationInMinutes, string reason, int? groupId = null)
+        {
+            var notification = new UserNotification
+            {
+                UserId = userId,
+                UserName = userName,
+                InitiatorUserId = initiatorUserId,
+                InitiatorFullName = name,
+                Message = message,
+                Reason = reason,
+                DurationInMinutes = durationInMinutes,
+                StartDateTime = startDateTime.DateTime,
+                EndDateTime = startDateTime.DateTime.AddMinutes(durationInMinutes),
+                IsRead = false,
+                GroupId = groupId
+            };
+
+            _context.UserNotifications.Add(notification);
+            await _context.SaveChangesAsync();
+        }
+
+        private async Task<bool> IsMeetingSlotAvailable(string userId, DateTimeOffset startDateTime, int durationInMinutes)
+        {
+            var endDateTime = startDateTime.AddMinutes(durationInMinutes);
+            return !(await _context.Meeting.AnyAsync(m => m.UserId == userId &&
+                                                         m.StartDateTime < endDateTime &&
+                                                         m.EndDateTime > startDateTime));
+        }
+
+        public async Task<OperationStatusResponse> ApproveMeeting(int notificationId, string approverUserId)
+        {
+            var notification = await _context.UserNotifications.FirstOrDefaultAsync(n => n.Id == notificationId && n.UserId == approverUserId);
+            bool isMeetingSlotAvailable = await IsMeetingSlotAvailable(approverUserId, notification.StartDateTime, notification.DurationInMinutes);
+            if (!isMeetingSlotAvailable)
+            {
+                return new OperationStatusResponse { IsSuccessful = false, Message = "Time slot not available." };
+            }
+
+            if (notification == null || notification.IsRead)
+            {
+                return new OperationStatusResponse { IsSuccessful = false, Message = "Notification not found or already processed." };
+            }
+
+
+            // Rest of your existing logic to create the meeting
+
+            if (notification.GroupId != null)
+            {
+                // Delete all meetings with the same GroupId
+                IEnumerable<Core.Entities.Meeting> meetingsToDelete = await _context.Meeting.Where(m => m.GroupId == notification.GroupId).ToListAsync();
+                _context.Meeting.RemoveRange(meetingsToDelete);
+                await _context.SaveChangesAsync();
+            }
+
+            int groupId = GenerateGroupId();
+
+            Core.Entities.Meeting meeting = new Core.Entities.Meeting
+            {
+                GroupId = groupId,
+                DurationInMinutes = notification.DurationInMinutes,
+                StartDateTime = notification.StartDateTime,
+                EndDateTime = notification.StartDateTime.AddMinutes(notification.DurationInMinutes),
+                Reason = notification.Reason,
+                UserId = notification.UserId,
+                UserName = notification.UserName,
+                InitiatorUserId = notification.InitiatorUserId,
+                InitiatorFullName = notification.InitiatorFullName
+            };
+
+            // Create a new meeting for the InitiatorUser
+            Core.Entities.Meeting initiatorMeeting = new Core.Entities.Meeting
+            {
+                GroupId = groupId,
+                DurationInMinutes = notification.DurationInMinutes,
+                StartDateTime = notification.StartDateTime,
+                EndDateTime = notification.StartDateTime.AddMinutes(notification.DurationInMinutes),
+                Reason = notification.Reason,
+                UserId = notification.InitiatorUserId,
+                UserName = notification.InitiatorFullName,
+                InitiatorUserId = notification.UserId,
+                InitiatorFullName = notification.UserName
+            };
+
+            _context.Meeting.Add(meeting);
+            _context.Meeting.Add(initiatorMeeting);
+
+            await _context.SaveChangesAsync();
+
+            // Mark notification as read
+            notification.IsRead = true;
+            await _context.SaveChangesAsync();
+
+            return new OperationStatusResponse { IsSuccessful = true, Message = "Meeting has been created successfully." };
+        }
+
+        private int GenerateGroupId()
+        {
+            return (int)(DateTime.UtcNow.Subtract(new DateTime(1970, 1, 1))).TotalSeconds;
+        }
+
+public async Task<UpdateMeetingResponse> UpdateMeeting(UpdateMeetingRequest request, string userId)
+{
+    var meeting = await _context.Meeting.Where(x => x.Id == request.MeetingId).FirstOrDefaultAsync();
+
+    if (meeting == null)
+    {
+        return new UpdateMeetingResponse { IsSuccessful = false, Message = "Meeting does not exist" };
+    }
+
+    if (meeting.UserId != userId) // Ensure that only the owner can update their meeting
+    {
+        return new UpdateMeetingResponse { IsSuccessful = false, Message = "Unauthorized access" };
+    }
+
+
+    // Prepare the message to send as a notification
+    string notificationMessage = $"The meeting with ID {request.MeetingId} has been updated. " +
+                                  $"New start time: {request.NewStartDateTime}, " +
+                                  $"New end time: {request.NewStartDateTime.AddMinutes(request.NewDurationInMinutes)}, " +
+                                  $"New duration: {request.NewDurationInMinutes} minutes, " +
+                                  $"New reason: {request.NewReason}. " +
+                                  $"Please approve or reject this update.";
+
+    // Send a notification for meeting approval
+    await SendNotificationAsync(meeting.UserId, meeting.UserName, meeting.InitiatorUserId, meeting.InitiatorFullName, notificationMessage, request.NewStartDateTime, request.NewDurationInMinutes, request.NewReason, meeting.GroupId);
+
+    return new UpdateMeetingResponse { IsSuccessful = true, Message = "Meeting update request has been sent." };
+}
     }
 }

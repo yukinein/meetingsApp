@@ -1,4 +1,4 @@
-using CalendlyTaskAPI.AppStartUp;
+﻿using CalendlyTaskAPI.AppStartUp;
 using CalendlyTaskAPI.Core.DbContext;
 using CalendlyTaskAPI.Core.Entities;
 using CalendlyTaskAPI.Core.SeedDB;
@@ -17,6 +17,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddControllers();
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddHttpContextAccessor();
 builder.Services.AddSwaggerGen(c =>
 {
     c.ResolveConflictingActions(apiDescriptions => apiDescriptions.First());
@@ -116,16 +117,21 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-app.UseCors("CalendlyAppCors");
-
 app.UseHttpsRedirection();
 
-app.UseAuthentication();
+app.UseRouting(); // Routing middleware'ini etkinleştir
 
-app.UseAuthorization();
+app.UseCors("CalendlyAppCors"); // CORS policy uygula
 
-app.MapControllers();
+app.UseAuthentication(); // Kimlik doğrulama middleware'ini çağır
+app.UseAuthorization(); // Yetkilendirme middleware'ini çağır
 
-AppDbInitializer.SeedDB(app).Wait();
+app.UseEndpoints(endpoints => // Endpoint'leri tanımla
+{
+    endpoints.MapControllers(); // Controller bazlı route'ları etkinleştir
+});
 
-app.Run();
+AppDbInitializer.SeedDB(app).Wait(); // Veritabanını başlangıç verileri ile doldur
+
+app.Run(); // Uygulamayı çalıştır
+

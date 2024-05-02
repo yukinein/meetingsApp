@@ -17,6 +17,8 @@ namespace CalendlyTaskAPI.AppStartUp
 
             services.AddScoped<IMeetingService, MeetingService>();
 
+            services.AddScoped<INotificationService, NotificationService>();
+
             return services;
         }
     }
