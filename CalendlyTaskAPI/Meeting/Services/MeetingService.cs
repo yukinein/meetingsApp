@@ -91,9 +91,9 @@ namespace CalendlyTaskAPI.Meeting.Services
 
         public async Task<DeleteMeetingResponse> DeleteMeeting(DeleteMeetingRequest request, string userId)
         {
-            var meeting = await _context.Meeting.Where(x => x.Id == request.MeetingId).FirstOrDefaultAsync();
+            var meeting = await _context.Meeting.FirstOrDefaultAsync(x => x.Id == request.MeetingId);
 
-            if (meeting is null)
+            if (meeting == null)
             {
                 return new DeleteMeetingResponse
                 {
@@ -101,7 +101,6 @@ namespace CalendlyTaskAPI.Meeting.Services
                 };
             }
 
-            // Check if the current user is the owner of the meeting
             if (meeting.UserId != userId)
             {
                 return new DeleteMeetingResponse
@@ -110,34 +109,34 @@ namespace CalendlyTaskAPI.Meeting.Services
                 };
             }
 
-            // Get the GroupId of the meeting being deleted
-            int groupId = meeting.GroupId;
+            // Find all meetings with the same GroupId to notify all affected users
+            var relatedMeetings = await _context.Meeting.Where(x => x.GroupId == meeting.GroupId).ToListAsync();
+            ApplicationUser initiator = await _userManager.FindByIdAsync(meeting.InitiatorUserId);
+            ApplicationUser cancellingUser = await _userManager.FindByIdAsync(userId);
 
-            // Find all meetings with the same GroupId
-            var meetingsToDelete = _context.Meeting.Where(x => x.GroupId == groupId && x.UserId == userId);
-
-            foreach (var meetingToDelete in meetingsToDelete)
+            foreach (var relMeeting in relatedMeetings)
             {
-                _context.Remove(meetingToDelete);
+                ApplicationUser relatedUser = await _userManager.FindByIdAsync(relMeeting.UserId);
+                string participantMessage = $"Your meeting scheduled on {relMeeting.StartDateTime} for '{relMeeting.Reason}' has been cancelled by {cancellingUser.FullName}.";
+                string ownerMessage = $"Your meeting scheduled on {relMeeting.StartDateTime} with {initiator.FullName} for '{relMeeting.Reason}' has been cancelled.";
+
+                // Determine the correct cancellation message based on the user
+                string cancellationMessage = relMeeting.UserId == userId ? ownerMessage : participantMessage;
+
+                // Send cancellation notification to each participant
+                await SendNotificationAsync(relMeeting.UserId, relatedUser.UserName, userId, "System", cancellationMessage, DateTime.UtcNow, 0, "Meeting Cancelled");
+                _context.Meeting.Remove(relMeeting);
             }
 
-            int rowsChanged = await _context.SaveChangesAsync();
+            await _context.SaveChangesAsync();
 
-            if (rowsChanged > 0)
+            return new DeleteMeetingResponse
             {
-                return new DeleteMeetingResponse
-                {
-                    OperationStatusResponse = new OperationStatusResponse { IsSuccessful = true, Message = $"Success. Meetings with GroupId {groupId} deleted successfully." },
-                };
-            }
-            else
-            {
-                return new DeleteMeetingResponse
-                {
-                    OperationStatusResponse = new OperationStatusResponse { IsSuccessful = false, Message = "Something went wrong." },
-                };
-            }
+                OperationStatusResponse = new OperationStatusResponse { IsSuccessful = true, Message = $"All meetings with GroupId {meeting.GroupId} have been cancelled successfully." }
+            };
         }
+
+
 
 
         public async Task<DropDownResponse> GetUsers(GetUsersRequest request)
